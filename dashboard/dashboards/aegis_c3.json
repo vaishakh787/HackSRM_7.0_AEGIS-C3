@@ -1,0 +1,57 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "title": "AEGIS-C3 Attack Monitor",
+  "uid": "aegis-c3-v1",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Attack Intensity (events / 30s)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 },
+      "datasource": "InfluxDB-AEGIS",
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"events\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"honeypot_event\")\n  |> filter(fn: (r) => r._field == \"count\")\n  |> aggregateWindow(every: 30s, fn: sum, createEmpty: false)\n  |> yield(name: \"attack_intensity\")"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 20 }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Events by Type",
+      "type": "piechart",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": "InfluxDB-AEGIS",
+      "targets": [
+        {
+          "refId": "B",
+          "query": "from(bucket: \"events\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"honeypot_event\")\n  |> filter(fn: (r) => r._field == \"count\")\n  |> group(columns: [\"event_type\"])\n  |> sum()\n  |> yield(name: \"by_type\")"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Top Attacker IPs",
+      "type": "table",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": "InfluxDB-AEGIS",
+      "targets": [
+        {
+          "refId": "C",
+          "query": "from(bucket: \"events\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"honeypot_event\")\n  |> filter(fn: (r) => r._field == \"count\")\n  |> group(columns: [\"attacker_ip\"])\n  |> sum()\n  |> sort(columns: [\"_value\"], desc: true)\n  |> limit(n: 10)\n  |> yield(name: \"top_ips\")"
+        }
+      ]
+    }
+  ]
+}
