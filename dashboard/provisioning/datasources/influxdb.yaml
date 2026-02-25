@@ -4,12 +4,12 @@ datasources:
   - name: InfluxDB-AEGIS
     type: influxdb
     access: proxy
-    url: http://localhost:8086
+    url: http://influxdb:8086  #not localhost
     jsonData:
       version: Flux
       organization: aegis
       defaultBucket: events
     secureJsonData:
-      token: YOUR_TOKEN_HERE   # Replace before use
+      token: aegis-super-secret-token  #replace before use
     isDefault: true
     editable: true
