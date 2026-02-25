@@ -1,24 +1,33 @@
 #!/usr/bin/env bash
 # =============================================================
 #  AEGIS-C3 — Attack Simulator
-#  Sends fake honeypot events directly to the Flask backend
-#  to test the full pipeline (Flask → InfluxDB → Grafana)
-#  without needing the ESP32 hardware.
+#  Sends real HTTP requests directly to the XIAO ESP32-C3
+#  honeypot webserver (port 80), triggering live detection:
+#    XIAO detects → sends event to Flask → stored in InfluxDB
+#                                        → shown in Grafana
 #
 #  Usage:
 #    chmod +x scripts/simulate_attack.sh
-#    ./scripts/simulate_attack.sh [backend_url]
+#    ./scripts/simulate_attack.sh <XIAO-IP>
 #
-#  Examples:
-#    ./scripts/simulate_attack.sh
-#    ./scripts/simulate_attack.sh http://192.168.1.42:5000
+#  Example:
+#    ./scripts/simulate_attack.sh 192.168.1.42
 # =============================================================
 
 set -euo pipefail
 
-BACKEND_URL="${1:-http://localhost:5000}"
-ENDPOINT="${BACKEND_URL}/event"
-DEVICE_ID="aegis-c3-sim-01"
+XIAO_IP="${1:-}"
+
+if [ -z "$XIAO_IP" ]; then
+    echo "Usage: $0 <XIAO-IP>"
+    echo "  Example: $0 192.168.1.42"
+    echo ""
+    echo "Find the XIAO IP from the Serial monitor after boot:"
+    echo "  [WiFi] Connected: 192.168.1.XX  ← that IP"
+    exit 1
+fi
+
+HONEYPOT_URL="http://${XIAO_IP}"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -26,73 +35,97 @@ RED='\033[0;31m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-info()    { echo -e "${GREEN}[sim]${NC} $*"; }
-warn()    { echo -e "${YELLOW}[sim]${NC} $*"; }
-send_event() {
-    local ip="$1" type="$2" detail="$3"
-    local payload
-    payload=$(printf '{"attacker_ip":"%s","event_type":"%s","detail":"%s","device_id":"%s","uptime_ms":%d}' \
-        "$ip" "$type" "$detail" "$DEVICE_ID" "$((RANDOM * 10))")
+info()  { echo -e "${GREEN}[sim]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[sim]${NC} $*"; }
+hit() {
+    local method="$1" path="$2" extra="${3:-}"
+    local url="${HONEYPOT_URL}${path}"
+    local http_status
 
-    HTTP_STATUS=$(curl -s -o /tmp/aegis_sim_resp.txt -w "%{http_code}" \
-        -X POST "${ENDPOINT}" \
-        -H "Content-Type: application/json" \
-        -d "$payload")
-
-    if [ "$HTTP_STATUS" -eq 200 ]; then
-        echo -e "  ${GREEN}✓${NC} ${CYAN}${type}${NC} from ${ip} — ${detail}"
+    if [ "$method" = "POST" ]; then
+        http_status=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "$url" \
+            --data "$extra" \
+            --connect-timeout 3 || echo "000")
     else
-        echo -e "  ${RED}✗${NC} HTTP ${HTTP_STATUS} — $(cat /tmp/aegis_sim_resp.txt)"
+        http_status=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X GET "$url" \
+            --connect-timeout 3 || echo "000")
     fi
+
+    if [ "$http_status" = "000" ]; then
+        echo -e "  ${RED}✗${NC} ${method} ${path} — no response (XIAO unreachable?)"
+    else
+        echo -e "  ${GREEN}✓${NC} ${CYAN}${method}${NC} ${path} — HTTP ${http_status}"
+    fi
+    sleep 0.5
 }
 
-# ── Health check first ────────────────────────────────────────
+# ── Reachability check ────────────────────────────────────────
 echo ""
 echo "============================================"
 echo -e "  ${CYAN}AEGIS-C3 Attack Simulator${NC}"
-echo "  Backend: ${ENDPOINT}"
+echo "  Target: ${HONEYPOT_URL} (XIAO honeypot)"
 echo "============================================"
-
-HTTP_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" "${BACKEND_URL}/health" || true)
-if [ "$HTTP_HEALTH" -ne 200 ]; then
-    echo -e "${RED}[sim]${NC} Backend not reachable at ${BACKEND_URL} (HTTP ${HTTP_HEALTH})."
-    echo "       Start the backend first:  cd backend && python app.py"
+echo ""
+info "Checking XIAO reachability ..."
+REACH=$(curl -s -o /dev/null -w "%{http_code}" "${HONEYPOT_URL}/admin" --connect-timeout 4 || echo "000")
+if [ "$REACH" = "000" ]; then
+    echo -e "${RED}[sim]${NC} Cannot reach XIAO at ${XIAO_IP}."
+    echo "      - Is the XIAO powered and connected to WiFi?"
+    echo "      - Is your laptop on the same network?"
+    echo "      - Check Serial monitor for the correct IP."
     exit 1
 fi
-info "Backend is healthy."
+info "XIAO is reachable (HTTP ${REACH})."
 echo ""
 
-# ── Scenario 1: Port/path scan ────────────────────────────────
-echo -e "${YELLOW}--- Scenario 1: Path Scan (5 hits from 10.0.0.1) ---${NC}"
-for path in /admin /login /wp-admin /phpmyadmin /.env; do
-    send_event "10.0.0.1" "scan" "SCAN ${path}"
-    sleep 0.3
-done
+# ── Phase 1: Path scan (triggers SCAN detection) ─────────────
+echo -e "${YELLOW}--- Phase 1: Path Scan (triggers scan detection on XIAO) ---${NC}"
+echo "    Sending 6 GET requests to different paths ..."
+echo "    SCAN_THRESHOLD=5 hits in 10s → detection fires"
+echo ""
+hit GET /admin
+hit GET /login
+hit GET /wp-admin
+hit GET /phpmyadmin
+hit GET /.env
+hit GET /config.php
 
 echo ""
+echo "    Watch for on XIAO Serial:"
+echo "    [Detection] SCAN detected from <your-laptop-IP>"
+echo "    [EventSender] POST -> HTTP 200"
+echo "    And: OLED shows !! ALERT !! + LED turns on"
+echo ""
+info "Waiting 8 seconds for XIAO alert to clear before Phase 2 ..."
+sleep 8
 
-# ── Scenario 2: Brute-force login ─────────────────────────────
-echo -e "${YELLOW}--- Scenario 2: Brute Force (3 POST attempts from 10.0.0.2) ---${NC}"
-for creds in "admin:password" "admin:admin123" "root:toor"; do
-    user="${creds%%:*}"
-    pass="${creds##*:}"
-    send_event "10.0.0.2" "brute_force" "POST /admin user=${user}"
-    sleep 0.3
-done
+# ── Phase 2: Brute-force (triggers BRUTE_FORCE detection) ────
+echo -e "${YELLOW}--- Phase 2: Brute Force (triggers brute_force detection on XIAO) ---${NC}"
+echo "    Sending 4 POST /admin requests with fake credentials ..."
+echo "    BRUTE_THRESHOLD=3 POSTs in 30s → detection fires"
+echo ""
+hit POST /admin "user=admin&pass=password123"
+hit POST /admin "user=admin&pass=admin"
+hit POST /admin "user=root&pass=toor"
+hit POST /admin "user=administrator&pass=letmein"
 
 echo ""
-
-# ── Scenario 3: Mixed traffic from multiple IPs ───────────────
-echo -e "${YELLOW}--- Scenario 3: Multi-IP Mixed Traffic ---${NC}"
-send_event "172.16.0.5"  "scan"        "SCAN /config.php"
-send_event "172.16.0.5"  "scan"        "SCAN /backup.zip"
-send_event "192.168.50.9" "brute_force" "POST /admin user=administrator"
-send_event "192.168.50.9" "brute_force" "POST /admin user=admin"
-send_event "10.10.10.10"  "scan"        "SCAN /.git/config"
-
+echo "    Watch for on XIAO Serial:"
+echo "    [Detection] BRUTE-FORCE detected from <your-laptop-IP>"
+echo "    [EventSender] POST -> HTTP 200"
+echo "    And: OLED shows !! ALERT !! + LED turns on"
 echo ""
+
+# ── Done ──────────────────────────────────────────────────────
 echo "============================================"
 echo -e "  ${GREEN}Simulation complete.${NC}"
-echo "  Open Grafana at http://localhost:3000"
+echo ""
+echo "  Expected end-to-end flow:"
+echo "  XIAO detected hits → sent events to Flask backend"
+echo "  → stored in InfluxDB → visible in Grafana"
+echo ""
+echo "  Open Grafana: http://localhost:3000"
 echo "  Dashboard: AEGIS-C3 Attack Monitor"
 echo "============================================"
